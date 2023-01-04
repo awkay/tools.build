@@ -138,40 +138,38 @@
       true
       (throw (ex-info (str "Unable to create parent dirs for: " (.toString child)) {})))))
 
-(defn- explode
-  [^File lib-file lib {:keys [out-dir buffer exclude handlers]} state]
-  (cond
-    (not (.exists lib-file))
-    state
+  (defn- explode
+    [^File lib-file lib {:keys [out-dir buffer exclude handlers]} state]
+    (cond
+      (not (.exists lib-file))
+      state
 
-    (str/ends-with? (.getPath lib-file) ".jar")
-    (with-open [jis (JarInputStream. (BufferedInputStream. (FileInputStream. lib-file)))]
-      (loop [the-state state]
-        (if-let [entry (.getNextJarEntry jis)]
-          (let [path (.getName entry)
-                out-file (jio/file out-dir path)
-                parent-file (.getParentFile out-file)]
-            (cond
-              ;; excluded or directory - do nothing
-              (or (exclude-from-uber? exclude path) (.isDirectory entry))
-              (recur the-state)
+      (str/ends-with? (.getPath lib-file) ".jar")
+      (with-open [jis (JarInputStream. (BufferedInputStream. (FileInputStream. lib-file)))]
+        (loop [the-state state]
+          (if-let [entry (.getNextJarEntry jis)]
+            (let [path (.getName entry)]
+              (if (or (exclude-from-uber? exclude path) (.isDirectory entry)) ; the directory '/' will cause jio/file to throw
+                (recur the-state)
+                (let [out-file    (jio/file out-dir path)
+                      parent-file (.getParentFile out-file)]
+              (cond
+                ;; conflict, same file from multiple sources - handle
+                (.exists out-file)
+                (recur (handle-conflict handlers entry buffer out-dir
+                         {:lib lib, :path path, :in jis, :existing out-file, :state the-state}))
 
-              ;; conflict, same file from multiple sources - handle
-              (.exists out-file)
-              (recur (handle-conflict handlers entry buffer out-dir
-                       {:lib lib, :path path, :in jis, :existing out-file, :state the-state}))
+                ;; write new file, parent dir exists for writing
+                (ensure-dir parent-file out-file)
+                (do
+                  (copy-stream! ^InputStream jis (BufferedOutputStream. (FileOutputStream. out-file)) buffer)
+                  (Files/setLastModifiedTime (.toPath out-file) (.getLastModifiedTime entry))
+                  (recur the-state))
 
-              ;; write new file, parent dir exists for writing
-              (ensure-dir parent-file out-file)
-              (do
-                (copy-stream! ^InputStream jis (BufferedOutputStream. (FileOutputStream. out-file)) buffer)
-                (Files/setLastModifiedTime (.toPath out-file) (.getLastModifiedTime entry))
-                (recur the-state))
-
-              :parent-dir-is-a-file
-              (throw (ex-info (format "Cannot write %s from %s as parent dir is a file from another lib. One of them must be excluded."
-                                path lib) {}))))
-          the-state)))
+                :parent-dir-is-a-file
+                (throw (ex-info (format "Cannot write %s from %s as parent dir is a file from another lib. One of them must be excluded."
+                                      path lib) {}))))))
+            the-state)))
 
     (.isDirectory lib-file)
     (do
